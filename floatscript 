@@ -1,1 +1,1028 @@
-j
+#include <iostream>
+#include <map>
+#include <vector>
+#include <string>
+#include <sstream>
+#include <cstdlib>
+#include <set>
+#include <cmath>
+#include <thread>      // For std::thread
+#include <cstring>     // For memcpy, memset
+#include <vector>      // For std::vector (for raw memory in unique_ptr)
+#include <memory>      // For std::unique_ptr
+#include <cstdint>     // For uintptr_t for printing pointers
+#if __cplusplus <= 201103L
+namespace std {
+	template<typename T, typename... Args>
+	std::unique_ptr<T> male_unique(Args&&... args) {
+		return std::unique_ptr<T>(new T(std::forward<Args>(args)...));
+	}
+}
+#endif
+// Forward declaration of exec for recursive calls (e.g., in functions)
+void exec(std::string w);
+
+struct LexValue; // Forward declaration
+
+typedef std::vector<LexValue> LexArray;
+
+struct LexValue
+{
+    enum Type
+    {
+        INT,
+        FLOAT,
+        STRING,
+        ARRAY,
+        BOOL,
+        NONE,
+        POINTER // type(represent a memory address)
+    } type;
+
+    int int_val;
+    double float_val;
+    std::string str_val;
+    LexArray arr_val;
+    bool bool_val;
+    void* ptr_val; 
+
+    LexValue() : type(NONE), int_val(0), float_val(0.0), bool_val(false), ptr_val(nullptr) {}
+    LexValue(int v) : type(INT), int_val(v), float_val(0.0), bool_val(v != 0), ptr_val(nullptr) {}
+    LexValue(double v) : type(FLOAT), int_val(0), float_val(v), bool_val(v != 0.0), ptr_val(nullptr) {}
+    LexValue(const std::string &v) : type(STRING), int_val(0), float_val(0.0), str_val(v), bool_val(!v.empty()), ptr_val(nullptr) {}
+    LexValue(const LexArray &v) : type(ARRAY), int_val(0), float_val(0.0), arr_val(v), bool_val(!v.empty()), ptr_val(nullptr) {}
+    LexValue(bool v) : type(BOOL), int_val(0), float_val(0.0), bool_val(v), ptr_val(nullptr) {}
+    LexValue(void* p) : type(POINTER), int_val(0), float_val(0.0), bool_val(false), ptr_val(p) {} // Constructor for(ptr)
+
+    void print() const
+    {
+        switch (type)
+        {
+        case INT:
+            std::cout << int_val;
+            break;
+        case FLOAT:
+            std::cout << float_val;
+            break;
+        case STRING:
+            std::cout << str_val;
+            break;
+        case ARRAY:
+        {
+            std::cout << "[";
+            for (size_t i = 0; i < arr_val.size(); ++i)
+            {
+                arr_val[i].print();
+                if (i + 1 < arr_val.size())
+                    std::cout << ", ";
+            }
+            std::cout << "]";
+            break;
+        }
+        case BOOL:
+            std::cout << (bool_val ? "true" : "false");
+            break;
+        case NONE:
+            std::cout << "none";
+            break;
+        case POINTER:
+            // Print memory address in hexadecimal format
+            std::cout << "0x" << std::hex << reinterpret_cast<uintptr_t>(ptr_val) << std::dec;
+            break;
+        }
+    }
+
+    bool equals(const LexValue &other) const
+    {
+        if (type != other.type)
+            return false;
+        switch (type)
+        {
+        case INT:
+            return int_val == other.int_val;
+        case FLOAT:
+            return float_val == other.float_val;
+        case STRING:
+            return str_val == other.str_val;
+        case BOOL:
+            return bool_val == other.bool_val;
+        case ARRAY:
+            if (arr_val.size() != other.arr_val.size())
+                return false;
+            for (size_t i = 0; i < arr_val.size(); ++i)
+                if (!arr_val[i].equals(other.arr_val[i]))
+                    return false;
+            return true;
+        case POINTER:
+            return ptr_val == other.ptr_val; // Compare(pointer addresses)
+        case NONE:
+            return true;
+        }
+        return false;
+    }
+};
+
+std::map<std::string, LexValue> vars;
+std::map<std::string, std::map<std::string, LexValue>> classes;
+std::map<std::string, std::vector<std::string>> funcs;
+std::map<std::string, std::vector<std::string>> funcs_with_braces;
+std::set<std::string> included_libs;
+// constraints
+std::map<std::string, std::unique_ptr<unsigned char[]>> allocated_memory_blocks;
+std::map<std::string, std::thread> active_threads;
+LexValue thread_arg_global;
+
+static std::string trim(const std::string &s)
+{
+    size_t start = s.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos)
+        return "";
+    size_t end = s.find_last_not_of(" \t\r\n");
+    return s.substr(start, end - start + 1);
+}
+
+// hex(octal) parser
+bool parseInt(const std::string &s, int &out)
+{
+    char *endptr;
+    long val = std::strtol(s.c_str(), &endptr, 0); 
+    if (*endptr == '\0')
+    {
+        out = static_cast<int>(val);
+        return true;
+    }
+    return false;
+}
+// scientific notation
+bool parseDouble(const std::string &s, double &out)
+{
+    char *endptr;
+    double val = std::strtod(s.c_str(), &endptr);
+    if (*endptr == '\0')
+    {
+        out = val;
+        return true;
+    }
+    return false;
+}
+
+// arrays
+static std::vector<std::string> parseArrayElements(const std::string &arr_content)
+{
+    std::vector<std::string> elems;
+    std::string token;
+    bool in_quotes = false;
+    for (size_t i = 0; i < arr_content.size(); ++i)
+    {
+        char c = arr_content[i];
+        if (c == '\'')
+        {
+            in_quotes = !in_quotes;
+            token += c; // Keep quotes in token for parseValue to handle
+        }
+        else if (c == ',' && !in_quotes)
+        {
+            elems.push_back(trim(token));
+            token.clear();
+        }
+        else
+        {
+            token += c;
+        }
+    }
+    if (!token.empty())
+        elems.push_back(trim(token));
+    return elems;
+}
+
+LexValue parseValue(const std::string &val_str)
+{
+    std::string val = trim(val_str);
+    if (val.empty())
+        return LexValue();
+
+    if (val == "true")
+        return LexValue(true);
+    if (val == "false")
+        return LexValue(false);
+
+    if (val.size() >= 2 && val.front() == '\'' && val.back() == '\'')
+    {
+        return LexValue(val.substr(1, val.size() - 2));
+    }
+
+    int ival;
+    if (parseInt(val, ival))
+        return LexValue(ival);
+
+    double dval;
+    if (parseDouble(val, dval))
+        return LexValue(dval);
+	// variable refernce
+    if (vars.count(val)) {
+        return vars[val];
+    }
+    return LexValue(val);
+}
+
+// Ternary: cond ? expr1 : expr2
+LexValue evalTernary(const std::string &expr)
+{
+    size_t qmark = expr.find('?');
+    size_t colon = expr.find(':');
+    if (qmark == std::string::npos || colon == std::string::npos || qmark > colon)
+    {
+        std::cerr << "Ternary error: Malformed ternary expression: " << expr << std::endl;
+        return LexValue();
+    }
+
+    std::string cond_str = trim(expr.substr(0, qmark));
+    std::string true_expr = trim(expr.substr(qmark + 1, colon - qmark - 1));
+    std::string false_expr = trim(expr.substr(colon + 1));
+
+    LexValue cond_val;
+    if (vars.count(cond_str))
+        cond_val = vars[cond_str];
+    else
+        cond_val = parseValue(cond_str); // Parse direct literal
+
+    bool cond = false;
+    switch (cond_val.type)
+    {
+    case LexValue::BOOL:
+        cond = cond_val.bool_val;
+        break;
+    case LexValue::INT:
+        cond = (cond_val.int_val != 0);
+        break;
+    case LexValue::FLOAT:
+        cond = (cond_val.float_val != 0.0);
+        break;
+    case LexValue::STRING:
+        cond = !cond_val.str_val.empty();
+        break;
+    case LexValue::ARRAY:
+        cond = !cond_val.arr_val.empty();
+        break;
+    case LexValue::POINTER:
+        cond = (cond_val.ptr_val != nullptr);
+        break;
+    case LexValue::NONE:
+        cond = false;
+        break;
+    }
+
+    return cond ? parseValue(true_expr) : parseValue(false_expr);
+}
+
+// Split(std::log) into namespace and function parts
+void splitNamespaceFunction(const std::string &cmd, std::string &ns, std::string &func)
+{
+    size_t pos = cmd.find("::");
+    if (pos != std::string::npos)
+    {
+        ns = cmd.substr(0, pos);
+        func = cmd.substr(pos + 2);
+    }
+    else
+    {
+        ns = "";
+        func = cmd;
+    }
+}
+
+// rpn(postfix)(evaluation)
+LexValue evalRPN(const std::vector<std::string>& tokens) {
+    std::vector<LexValue> stack;
+    for (const std::string& tok : tokens) {
+        if (tok == "+" || tok == "-" || tok == "*" || tok == "/") {
+            if (stack.size() < 2) {
+                std::cerr << "RPN error: too few operands for operator " << tok << "\n";
+                return LexValue();
+            }
+            LexValue b = stack.back(); stack.pop_back();
+            LexValue a = stack.back(); stack.pop_back();
+            if ((a.type == LexValue::INT || a.type == LexValue::FLOAT) &&
+                (b.type == LexValue::INT || b.type == LexValue::FLOAT)) {
+                double left = (a.type == LexValue::INT) ? a.int_val : a.float_val;
+                double right = (b.type == LexValue::INT) ? b.int_val : b.float_val;
+                double res = 0;
+                if (tok == "+") res = left + right;
+                else if (tok == "-") res = left - right;
+                else if (tok == "*") res = left * right;
+                else if (tok == "/") {
+                    if (right == 0) {
+                        std::cerr << "RPN error: division by zero (returns none)\n";
+                        return LexValue(); 
+                    }
+                    res = left / right;
+                }
+                // Determinant(int or float)
+                if (res == floor(res))
+                    stack.push_back(LexValue(static_cast<int>(res)));
+                else
+                    stack.push_back(LexValue(res));
+            } else {
+                std::cerr << "RPN error: operands for " << tok << " must be numeric\n";
+                return LexValue();
+            }
+        } else {
+            // push literal onto stack
+            if (vars.count(tok)) {
+                stack.push_back(vars[tok]);
+            } else {
+                stack.push_back(parseValue(tok));
+            }
+        }
+    }
+    if (stack.size() != 1) {
+        std::cerr << "RPN error: leftover items on stack\n";
+        return LexValue();
+    }
+    return stack[0];
+}
+//func(exec)_dif thread using std::thread
+void executeFloatscriptFunctionThreaded(std::string func_name, LexValue arg_val) {
+    if (funcs_with_braces.count(func_name)) {
+        
+        thread_arg_global = arg_val;
+
+        // for(line:function){exec()}
+        for (const std::string& line : funcs_with_braces[func_name]) {
+            exec(line);
+        }
+        thread_arg_global = LexValue(); // reset thread
+    } else {
+        std::cerr << "[Thread Error] Function '" << func_name << "' not found for threaded execution.\n";
+    }
+}
+
+
+void exec(std::string w)
+{
+    // work with(#include <library>)
+    if (w.find("#include") == 0) {
+        size_t start = w.find('<'), end = w.find('>');
+        if (start != std::string::npos && end != std::string::npos && end > start) {
+            std::string lib = w.substr(start + 1, end - start - 1);
+            included_libs.insert(lib);
+            std::cout << "Included library: <" << lib << ">\n";
+        } else {
+            std::cerr << "Malformed include statement.\n";
+        }
+        return;
+    }
+
+    std::istringstream line(w);
+    std::string full_cmd, arg;
+    line >> full_cmd;
+
+    std::string ns, cmd;
+    splitNamespaceFunction(full_cmd, ns, cmd);
+
+    // standard namespace library (std::) commands
+    if (ns == "std")
+    {
+        if (cmd == "log")
+        {
+            std::string msg;
+            std::getline(line, msg);
+            std::cout << "[STD LOG] " << trim(msg) << std::endl;
+            return;
+        }
+        if (cmd == "out")
+        {
+            std::string out;
+            std::getline(line, out);
+            out = trim(out);
+
+            size_t l = out.find('[');
+            size_t r = out.find(']');
+            if (l != std::string::npos && r != std::string::npos && r > l)
+            {
+                std::string name = out.substr(0, l);
+                int idx = 0;
+                if (!parseInt(out.substr(l + 1, r - l - 1), idx))
+                {
+                    std::cerr << "Invalid index: " << out.substr(l + 1, r - l - 1) << "\n";
+                    return;
+                }
+                if (vars.count(name) && vars[name].type == LexValue::ARRAY)
+                {
+                    if (idx >= 0 && idx < static_cast<int>(vars[name].arr_val.size()))
+                    {
+                        vars[name].arr_val[idx].print();
+                        std::cout << std::endl;
+                    }
+                    else
+                    {
+                        std::cerr << "Index out of bounds for array '" << name << "': " << idx << "\n";
+                    }
+                }
+                else
+                {
+                    std::cerr << "Variable '" << name << "' not found or not an array.\n";
+                }
+            }
+            else
+            {
+                if (vars.count(out))
+                {
+                    vars[out].print();
+                    std::cout << std::endl;
+                }
+                else
+                {
+                    // if it's not a variable, treat as a direct literal(string)
+                    std::cout << parseValue(out).str_val << std::endl;
+                }
+            }
+            return;
+        }
+        //Rpn librayr
+        if (cmd == "rpn") {
+            if (included_libs.count("rpn") == 0) {
+                std::cerr << "Error: <rpn> library not included. Use #include <rpn>\n";
+                return;
+            }
+            std::string possible_var;
+            std::istream::sentry s(line); // restore stream
+            std::streampos old_pos = line.tellg(); // save stream position
+
+            if (line >> possible_var) { // read rpn(tok)
+                std::string eq;
+                if (line >> eq && eq == "=") { // if/not assigned
+                    std::vector<std::string> tokens;
+                    std::string tok;
+                    while (line >> tok) tokens.push_back(tok);
+                    LexValue res = evalRPN(tokens);
+                    if (res.type != LexValue::NONE) { 
+                        vars[possible_var] = res;
+                        res.print();
+                        std::cout << std::endl;
+                    }
+                    return;
+                } else {
+                    line.clear(); // clear(error_flags)
+                    line.seekg(old_pos); // default to start
+                    std::vector<std::string> tokens;
+                    std::string tok;
+                    while (line >> tok) tokens.push_back(tok);
+                    LexValue res = evalRPN(tokens);
+                    if (res.type != LexValue::NONE) {
+                        res.print();
+                        std::cout << std::endl;
+                    }
+                    return;
+                }
+            }
+            std::cerr << "Usage: std::rpn [var =] <rpn-expr>\n";
+            return;
+        }
+        std::cerr << "Unknown std:: command: " << cmd << std::endl;
+        return;
+    }
+	//end(standard(lib_commands))
+
+    // low_level part
+    if (ns == "mem") {
+        if (included_libs.count("mem") == 0) {
+            std::cerr << "Error: <mem> library not included. Use #include <mem>\n";
+            return;
+        }
+
+        if (cmd == "alloc") { // mem::alloc var_name size_in_bytes
+            std::string var_name;
+            int size;
+            line >> var_name >> size;
+            if (size <= 0) {
+                std::cerr << "mem::alloc error: Size must be positive.\n";
+                return;
+            }
+            if (vars.count(var_name)) {
+                std::cerr << "mem::alloc error: Variable '" << var_name << "' already exists. Cannot re-allocate without freeing.\n";
+                return;
+            }
+            try {
+                // alloc(dynamic_mem) using unique_ptr
+                std::unique_ptr<unsigned char[]> block(new unsigned char[size]);
+                // store(unique_ptr in map), using the var_name as key
+                allocated_memory_blocks[var_name] = std::move(block);
+                // store(ptr)
+                vars[var_name] = LexValue(allocated_memory_blocks[var_name].get());
+                // alloc_mem_sizes[var_name] = size; 
+                std::cout << "Allocated " << size << " bytes at ";
+                vars[var_name].print();//so far so good<lusungu>
+                std::cout << " for '" << var_name << "'\n";
+            } catch (const std::bad_alloc& e) {
+                std::cerr << "mem::alloc error: Failed to allocate memory: " << e.what() << "\n";
+            }
+            return;
+        }
+        if (cmd == "free") { // mem::free var_name
+            std::string var_name;
+            line >> var_name;
+            if (!vars.count(var_name) || vars[var_name].type != LexValue::POINTER) {
+                std::cerr << "mem::free error: Variable '" << var_name << "' not a valid memory pointer (or not allocated by mem::alloc).\n";
+                return;
+            }
+            if (allocated_memory_blocks.count(var_name)) {
+                allocated_memory_blocks.erase(var_name); // del(unique_ptr(call))
+                vars.erase(var_name); // remove the ptr var from(scope)
+                // remove size(if_stored)?
+                std::cout << "Freed memory for '" << var_name << "'\n";
+            } else {
+                std::cerr << "mem::free error: Memory block for '" << var_name << "' not found or already freed.\n";
+            }
+            return;
+        }
+        if (cmd == "write_byte") { // mem::write_byte ptr_var offset value
+            std::string ptr_var_name;
+            int offset, value;
+            line >> ptr_var_name >> offset >> value;
+            if (!vars.count(ptr_var_name) || vars[ptr_var_name].type != LexValue::POINTER) {
+                std::cerr << "mem::write_byte error: '" << ptr_var_name << "' is not a valid memory pointer.\n";
+                return;
+            }
+            if (offset < 0) {
+                 std::cerr << "mem::write_byte error: Offset cannot be negative.\n";
+                 return;
+            }
+            if (value < 0 || value > 255) {
+                std::cerr << "mem::write_byte error: Value must be between 0 and 255 (a byte).\n";
+                return;
+            }
+
+            unsigned char* ptr = static_cast<unsigned char*>(vars[ptr_var_name].ptr_val);
+            // writing past allocated memory will cause a crash.
+            ptr[offset] = static_cast<unsigned char>(value);
+            std::cout << "Wrote byte " << value << " to address 0x" << std::hex// new style
+                      << reinterpret_cast<uintptr_t>(ptr + offset) << std::dec << "\n";
+            return;
+        }
+        if (cmd == "read_byte") { // mem::read_byte result_var ptr_var offset
+            std::string result_var_name, ptr_var_name;
+            int offset;
+            line >> result_var_name >> ptr_var_name >> offset;
+            if (!vars.count(ptr_var_name) || vars[ptr_var_name].type != LexValue::POINTER) {
+                std::cerr << "mem::read_byte error: '" << ptr_var_name << "' is not a valid memory pointer.\n";
+                return;
+            }
+            if (offset < 0) {
+                 std::cerr << "mem::read_byte error: Offset cannot be negative.\n";
+                 return;
+            }
+
+            unsigned char* ptr = static_cast<unsigned char*>(vars[ptr_var_name].ptr_val);
+            // dont read past alloc(mem)[warned]
+            int byte_value = static_cast<int>(ptr[offset]);
+            vars[result_var_name] = LexValue(byte_value);
+            std::cout << "Read byte " << byte_value << " from address 0x" << std::hex
+                      << reinterpret_cast<uintptr_t>(ptr + offset) << std::dec << " into '" << result_var_name << "'\n";
+            return;
+        }
+        if (cmd == "spawn_thread") { // mem::spawn_thread thread_name function_name [arg_value_or_var]
+            std::string thread_name, func_name;
+            std::string arg_str_raw; // raw string(litera)
+            line >> thread_name >> func_name;
+            std::getline(line, arg_str_raw); // read(line)
+            arg_str_raw = trim(arg_str_raw);
+
+            if (active_threads.count(thread_name)) {
+                std::cerr << "mem::spawn_thread error: Thread '" << thread_name << "' already exists or is running. Use mem::join_thread first.\n";
+                return;
+            }
+            if (!funcs_with_braces.count(func_name)) {
+                std::cerr << "mem::spawn_thread error: Function '" << func_name << "' not defined with braces (fn).\n";
+                return;
+            }
+
+            LexValue arg_val; // Val to(pass to thread)
+            if (!arg_str_raw.empty()) {
+                arg_val = parseValue(arg_str_raw); // Parse it as a value (could be literal or variable content)
+            } else {
+                arg_val = LexValue(); // void |no(argument)
+            }
+            // Launch the thread
+            // std::thread(movement(obj))
+            active_threads[thread_name] = std::thread(executeFloatscriptFunctionThreaded, func_name, arg_val);
+            std::cout << "Spawned thread '" << thread_name << "' to execute function '" << func_name << "'.\n";
+            return;
+        }
+        if (cmd == "join_thread") { // mem::join_thread thread_name
+            std::string thread_name;
+            line >> thread_name;
+            if (active_threads.count(thread_name)) {
+                if (active_threads[thread_name].joinable()) {
+                    active_threads[thread_name].join(); // wait(thread_finish)
+                    std::cout << "Joined thread '" << thread_name << "'.\n";
+                } else {
+                    std::cerr << "mem::join_thread error: Thread '" << thread_name << "' is not joinable (already joined or not started/valid).\n";
+                }
+                active_threads.erase(thread_name); //remove from(active list.after augmentation(joined)
+            } else {
+                std::cerr << "mem::join_thread error: Thread '" << thread_name << "' not found.\n";
+            }
+            return;
+        }
+
+        std::cerr << "Unknown mem:: command: " << cmd << std::endl;
+        return;
+    }
+    // whew!, no more(low_level_programming)
+    if (cmd == "let")
+    {
+        line >> arg;
+        std::string eq, val_str;
+        line >> eq;
+        std::getline(line, val_str);
+        val_str = trim(val_str);
+
+        int ival;
+        if (parseInt(val_str, ival))
+        {
+            vars[arg] = LexValue(ival);
+        }
+        else
+        {
+            std::cerr << "Error: 'let' can only assign integer values. Found: '" << val_str << "'\n";
+        }
+        return;
+    }
+
+    if (cmd == "lex")
+    {
+        line >> arg; // var(name)
+        std::string eq, rest;
+        line >> eq; // =(assign)
+        std::getline(line, rest); // the rest of the line is the val(expr)
+        rest = trim(rest);
+
+        if (!rest.empty() && rest.front() == '[' && rest.back() == ']')
+        {
+            // arr_assingment
+            std::string arr_content = rest.substr(1, rest.size() - 2);
+            LexArray arr;
+            std::vector<std::string> elems = parseArrayElements(arr_content);
+            for (const auto& val : elems)
+                arr.push_back(parseValue(val));
+            vars[arg] = LexValue(arr);
+        }
+        else if (rest.find('?') != std::string::npos && rest.find(':') != std::string::npos)
+        {
+            // ternary(assignment)
+            vars[arg] = evalTernary(rest);
+        }
+        else if (vars.count(rest)) // assign 1(var) to other
+        {
+            vars[arg] = vars[rest];
+        }
+        else
+        {//ordinary(assignment)
+            vars[arg] = parseValue(rest);
+        }
+        return;
+    }
+
+    if (cmd == "opt")
+    {
+        line >> arg;
+        if (arg == "out")
+        {
+            std::string out;
+            std::getline(line, out);
+            out = trim(out);
+
+            size_t l = out.find('[');
+            size_t r = out.find(']');
+            if (l != std::string::npos && r != std::string::npos && r > l)
+            {
+                std::string name = out.substr(0, l);
+                int idx = 0;
+                if (!parseInt(out.substr(l + 1, r - l - 1), idx))
+                {
+                    std::cerr << "Invalid index: " << out.substr(l + 1, r - l - 1) << "\n";
+                    return;
+                }
+                if (vars.count(name) && vars[name].type == LexValue::ARRAY)
+                {
+                    if (idx >= 0 && idx < static_cast<int>(vars[name].arr_val.size()))
+                    {
+                        vars[name].arr_val[idx].print();
+                        std::cout << std::endl;
+                    }
+                    else
+                    {
+                        std::cerr << "Index out of bounds for array '" << name << "': " << idx << "\n";
+                    }
+                }
+                else
+                {
+                    std::cerr << "Variable '" << name << "' not found or not an array.\n";
+                }
+            }
+            else
+            {
+                if (vars.count(out))
+                {
+                    vars[out].print();
+                    std::cout << std::endl;
+                }
+                else
+                {
+                    // if(=!(var)) treat as literal string
+                    std::cout << parseValue(out).str_val << std::endl;
+                }
+            }
+            return;
+        }
+        std::cerr << "Unknown opt command: " << arg << std::endl;
+        return;
+    }
+
+    if (cmd == "sys")
+    {
+        line >> arg;
+        if (arg == "log")
+        {
+            std::string log_msg;
+            std::getline(line, log_msg);
+            std::cout << "[LOG] " << trim(log_msg) << std::endl;
+            return;
+        }
+        std::cerr << "Unknown sys command: " << arg << std::endl;
+        return;
+    }
+
+    if (cmd == "if")
+    {
+        std::string var_name, op, val_str, then_word;
+        // read(condition).given
+        line >> var_name >> op >> val_str >> then_word;
+
+        if (then_word != "then") {
+            std::cerr << "Syntax error: Expected 'then' after if condition. Found: '" << then_word << "'\n";
+            return;
+        }
+
+        if (!vars.count(var_name)) {
+            std::cerr << "If error: Variable '" << var_name << "' not found.\n";
+            return;
+        }
+
+        LexValue left_val = vars[var_name]; // var(val)
+        LexValue right_val = parseValue(val_str); // comparison
+
+        bool condition = false;
+
+        // conditional(operator)
+        if (op == "==") {
+            condition = left_val.equals(right_val);
+        } else if (op == "!=") {
+            condition = !left_val.equals(right_val);
+        } else if (op == "<") {
+            if (left_val.type == LexValue::INT && right_val.type == LexValue::INT)
+                condition = left_val.int_val < right_val.int_val;
+            else if (left_val.type == LexValue::FLOAT && right_val.type == LexValue::FLOAT)
+                condition = left_val.float_val < right_val.float_val;
+            else
+                std::cerr << "Comparison error: '<' requires numeric types. Got: " << left_val.type << ", " << right_val.type << "\n";
+        } else if (op == ">") {
+            if (left_val.type == LexValue::INT && right_val.type == LexValue::INT)
+                condition = left_val.int_val > right_val.int_val;
+            else if (left_val.type == LexValue::FLOAT && right_val.type == LexValue::FLOAT)
+                condition = left_val.float_val > right_val.float_val;
+            else
+                std::cerr << "Comparison error: '>' requires numeric types. Got: " << left_val.type << ", " << right_val.type << "\n";
+        } else {
+            std::cerr << "If error: Unknown operator '" << op << "'.\n";
+        }
+
+        // if(true)(exec)
+        if (condition)
+        {
+            std::string rest;
+            std::getline(line, rest); // read(until.next.line)
+            rest = trim(rest);
+            // stop execution of the current line.using return
+            if (!rest.empty() && rest.find("return") != std::string::npos)
+                return;
+            if (!rest.empty())
+                exec(rest); // possible(recursive(call))
+        }
+        return;
+    }
+    //range_based for loop, for x : arr { //code }
+    if (cmd == "for")
+    {
+    	std::string loop_var, colon;
+    	line >> loop_var >> colon;
+    	
+    	if (colon == ":")
+    	{
+    		std::string container_var;
+    		line >> container_var;
+    		std::string rest_of_loop_body;
+    		std::getline(line, rest_of_loop_body);
+    		rest_of_loop_body = trim(rest_of_loop_body);
+    		
+    		if (!vars.count(container_var))
+    		{
+    			std::cerr<< "For loop error: '" <<container_var<<"'not found.\n";
+    			return;
+			}
+			if (vars[container_var].type != LexValue::ARRAY)
+			{
+				std::cerr<< "For loop error: '" <<container_var<<"'is not an arr\n";
+				return;
+			}
+			for (const auto& element : vars[container_var].arr_val)
+			{
+				vars[loop_var] = element;
+				if (!rest_of_loop_body.empty())
+					exec(rest_of_loop_body);
+			}
+			return;
+		}
+		else
+		{
+			line.seekg(0);
+			line.clear();
+		}
+	}
+
+    if (cmd == "For")
+    {
+        std::string var, from_word, to_word;
+        int start_val, end_val;
+        line >> var >> from_word >> start_val >> to_word >> end_val;
+
+        if (from_word != "from" || to_word != "to") {
+            std::cerr << "Syntax error: Expected 'from' and 'to' in for loop. Found: '" << from_word << "', '" << to_word << "'\n";
+            return;
+        }
+
+        // repition(iteration)
+        std::string rest_of_loop_body;
+        std::getline(line, rest_of_loop_body);
+        rest_of_loop_body = trim(rest_of_loop_body);
+
+
+        for (int i = start_val; i <= end_val; ++i)
+        {
+            vars[var] = LexValue(i); // Update loop(var)
+            if (!rest_of_loop_body.empty())
+                exec(rest_of_loop_body); // for each iteration {exec}
+        }
+        return;
+    }
+
+    if (cmd == "class")
+    {
+        line >> arg; // class name
+        if (classes.count(arg)) {
+            std::cerr << "Class '" << arg << "' already defined.\n";
+            return;
+        }
+        classes[arg] = std::map<std::string, LexValue>(); // initialize(map)(for.empty
+        std::cout << "Class '" << arg << "' defined.\n";
+        return;
+    }
+    if (cmd == "set")
+    {
+        std::string class_name, member_name, eq_token;
+        line >> class_name >> member_name >> eq_token; // read(OOP)
+        std::string val_str;
+        std::getline(line, val_str);
+        val_str = trim(val_str);
+
+        if (!classes.count(class_name))
+        {
+            std::cerr << "Class '" << class_name << "' not found for set operation.\n";
+            return;
+        }
+        if (eq_token != "=") {
+            std::cerr << "Syntax error: Expected '=' in set operation. Found: '" << eq_token << "'\n";
+            return;
+        }
+
+        LexValue val = parseValue(val_str);
+        classes[class_name][member_name] = val;
+        std::cout << "Set member '" << member_name << "' in class '" << class_name << "'.\n";
+        return;
+    }
+    if (cmd == "get")
+    {
+        std::string class_name, member_name;
+        line >> class_name >> member_name; // read(class_name & memb_name)
+
+        if (classes.count(class_name) && classes[class_name].count(member_name))
+        {
+            classes[class_name][member_name].print();
+            std::cout << std::endl;
+        }
+        else
+        {
+            std::cerr << "Class '" << class_name << "' or member '" << member_name << "' not found for get operation.\n";
+        }
+        return;
+    }
+
+    if (cmd == "def") // function definition
+    {
+        line >> arg; // name
+        if (funcs.count(arg) || funcs_with_braces.count(arg)) {
+            std::cerr << "Function '" << arg << "' already defined.\n";
+            return;
+        }
+        funcs[arg] = std::vector<std::string>();
+        std::string line_str;
+        std::cout << "Enter function body (type 'end' to finish):\n";
+        while (std::getline(std::cin, line_str) && trim(line_str) != "end")
+        {
+            funcs[arg].push_back(line_str);
+        }
+        std::cout << "Function '" << arg << "' defined.\n";
+        return;
+    }
+
+    if (cmd == "fn") // fn definition with'{}'
+    {
+        line >> arg; //name
+        std::string brace;
+        line >> brace; // read(open.brace)
+
+        if (brace != "{") {
+            std::cerr << "Syntax error: Expected '{' after function name in 'fn' definition. Found: '" << brace << "'\n";
+            return;
+        }
+        if (funcs.count(arg) || funcs_with_braces.count(arg)) {
+            std::cerr << "Function '" << arg << "' already defined.\n";
+            return;
+        }
+
+        funcs_with_braces[arg] = std::vector<std::string>();
+        std::string line_str;
+        std::cout << "Enter function body (type '}' to finish):\n";
+        while (std::getline(std::cin, line_str) && trim(line_str) != "}")
+        {
+            if (!line_str.empty())
+                funcs_with_braces[arg].push_back(line_str);
+        }
+        std::cout << "Function '" << arg << "' defined.\n";
+        return;
+    }
+
+    // if(command matches->defined function name) attempt to call
+    if (funcs.count(cmd))
+    {
+        for (const std::string& func_line : funcs[cmd])
+        {
+            exec(func_line); // exec(each.line(fn{}))
+        }
+        return;
+    }
+
+    if (funcs_with_braces.count(cmd))
+    {
+        for (const std::string& func_line : funcs_with_braces[cmd])
+        {
+            exec(func_line); // "
+        }
+        return;
+    }
+
+    if (cmd == "thread_arg") {
+        if (thread_arg_global.type != LexValue::NONE) {
+            thread_arg_global.print();
+            std::cout << std::endl;
+        } else {
+            std::cout << "none (thread_arg not set or consumed)\n";
+        }
+        return;
+    }
+    
+    // if(no_cmd(matches){unknown}
+    std::cerr << "Unknown command: " << full_cmd << std::endl;
+}
+//Whew!, at least
+int main()
+{
+    std::string code;
+    std::cout << "This is |floatscript.flt| made by: L.Luh4n4 (type 'exit' to terminate):\n";
+    std::cout << "Type '#include <lib_name>' to include libraries (e.g., <rpn>, <mem>).\n";
+
+    while (std::getline(std::cin, code) && code != "exit")
+    {
+        exec(code);
+    }
+	//carefull
+    for (auto& pair : active_threads) {
+        if (pair.second.joinable()) {
+            std::cerr << "Warning: Unjoined thread '" << pair.first << "' detected at exit. Joining now...\n";
+            pair.second.join(); // ensure(thread_completion)
+        }
+    }
+    // ptr in alloc(mem) -> auto(free mem when mao is destroyed(at(end(main))))
+    return 0;
+}//please_coMPILE
