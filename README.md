@@ -1,2 +1,2 @@
-# Openscript-
-A programming language created by a 14 yr old 
+floatscript 
+A stack based opensource programming language with dynamic typing and low-level systems control and high level arithmetic evaluation with reverse Polish notation 
